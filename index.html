@@ -54,9 +54,9 @@
       height: 100%;
       pointer-events: none;
       z-index: 3;
-      /* Soft focus — real leaf shadows are a bit blurry */
-      filter: blur(10px) contrast(1.05);
-      opacity: 0.55;
+      /* Soft projected shadows — light blur, silhouettes stay leafy */
+      filter: blur(4.5px) contrast(1.14);
+      opacity: 0.62;
       mix-blend-mode: multiply;
     }
 
@@ -133,7 +133,7 @@
     }
 
     @media (prefers-reduced-motion: reduce) {
-      #leaves { filter: blur(12px); opacity: 0.4; }
+      #leaves { filter: blur(5.5px); opacity: 0.5; }
     }
   </style>
 </head>
@@ -190,9 +190,11 @@
       const canvas = document.getElementById("leaves");
       const ctx = canvas.getContext("2d", { alpha: true });
       const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+      const SPECIES = ["maple", "oak", "elm", "birch"];
 
       let w = 0, h = 0, dpr = 1;
       let leaves = [];
+      let paths = {};
       let t0 = performance.now();
 
       function resize() {
@@ -207,76 +209,198 @@
         seed();
       }
 
-      // Organic leaf-ish blob in local coords
-      function leafPath(c, scale, lean) {
-        c.beginPath();
-        c.moveTo(0, -scale * 1.1);
-        c.bezierCurveTo(scale * 0.75 * lean, -scale * 0.7, scale * 0.95, scale * 0.15, 0, scale * 1.15);
-        c.bezierCurveTo(-scale * 0.95, scale * 0.15, -scale * 0.75 * lean, -scale * 0.7, 0, -scale * 1.1);
-        c.closePath();
+      /** Mirror a right-half outline (tip at index 0) into a closed leaf. */
+      function mirrorHalf(half) {
+        const left = [];
+        for (let i = half.length - 1; i >= 1; i--) {
+          left.push([-half[i][0], half[i][1]]);
+        }
+        return half.concat(left);
+      }
+
+      function buildPath(points) {
+        const path = new Path2D();
+        path.moveTo(points[0][0], points[0][1]);
+        for (let i = 1; i < points.length; i++) {
+          path.lineTo(points[i][0], points[i][1]);
+        }
+        path.closePath();
+        return path;
+      }
+
+      // Palmate maple: 5 pointed lobes + petiole. Sinuses stay deep
+      // enough to read after blur, without pinching into a star.
+      const MAPLE_HALF = [
+        [0.00, -1.06],
+        [0.12, -0.84], [0.06, -0.70],
+        [0.22, -0.76], [0.40, -0.60], [0.52, -0.40],
+        [0.30, -0.36], [0.20, -0.22],
+        [0.50, -0.26], [0.78, -0.12], [0.98, 0.04],
+        [0.68, 0.10], [0.38, 0.02], [0.24, 0.10],
+        [0.46, 0.28], [0.52, 0.50], [0.32, 0.42],
+        [0.16, 0.30], [0.12, 0.50], [0.07, 0.66],
+        [0.035, 0.84], [0.028, 1.14],
+      ];
+
+      function serratedHalf(steps, length, fat, tooth, peak) {
+        const pts = [[0, -1.12]];
+        for (let i = 1; i < steps; i++) {
+          const t = i / steps;
+          const y = -1.12 + t * length;
+          const body = Math.sin(Math.pow(t, peak) * Math.PI) * fat;
+          const jag = 1 + tooth * (i % 2 === 0 ? 1 : -1);
+          pts.push([body * jag, y]);
+        }
+        pts.push([0.032, 0.78], [0.022, 1.14]);
+        return pts;
+      }
+
+      function oakLobes(sign, phase) {
+        const pts = [];
+        const n = 28;
+        for (let i = 0; i < n; i++) {
+          const t = i / n;
+          const y = -1.1 + t * 1.82;
+          const ovate = Math.sin(Math.pow(t, 0.92) * Math.PI) * 0.50;
+          const wave = 0.74 + 0.26 * Math.pow(
+            Math.abs(Math.sin((t + phase) * Math.PI * 4.5)),
+            1.7
+          );
+          pts.push([sign * ovate * wave, y]);
+        }
+        return pts;
+      }
+
+      function oakPoints() {
+        return oakLobes(1, 0)
+          .concat([[0.025, 1.12], [-0.025, 1.12]])
+          .concat(oakLobes(-1, 0.11).reverse());
+      }
+
+      function birchHalf() {
+        const pts = [[0, -1.12]];
+        const steps = 20;
+        for (let i = 1; i < steps; i++) {
+          const t = i / steps;
+          const y = -1.12 + t * 1.84;
+          const tri = Math.pow(t, 0.88) * Math.pow(1 - t, 0.55) * 1.28;
+          const jag = 1 + 0.10 * (i % 2 === 0 ? 1 : -1);
+          pts.push([tri * jag, y]);
+        }
+        pts.push([0.03, 0.82], [0.02, 1.12]);
+        return pts;
+      }
+
+      function initPaths() {
+        paths = {
+          maple: buildPath(mirrorHalf(MAPLE_HALF)),
+          oak: buildPath(oakPoints()),
+          elm: buildPath(mirrorHalf(serratedHalf(22, 1.86, 0.40, 0.09, 0.95))),
+          birch: buildPath(mirrorHalf(birchHalf())),
+        };
+      }
+
+      function pickSpecies(bias) {
+        if (Math.random() < 0.72) return bias;
+        return SPECIES[Math.floor(Math.random() * SPECIES.length)];
+      }
+
+      function layerAlpha(layer) {
+        return layer === 0 ? 0.20 : layer === 1 ? 0.14 : 0.09;
+      }
+
+      function layerScale(layer) {
+        const base = layer === 0 ? 58 : layer === 1 ? 44 : 32;
+        const span = layer === 0 ? 62 : layer === 1 ? 40 : 26;
+        return base + Math.random() * span;
+      }
+
+      function createLeaf(x, y, rot, species, layer, phase, speed) {
+        return {
+          x, y, rot, species, layer, phase, speed,
+          scale: layerScale(layer),
+          flip: Math.random() < 0.5 ? 1 : -1,
+          amp: 7 + Math.random() * 22,
+          rotAmp: 0.05 + Math.random() * 0.14,
+          alpha: layerAlpha(layer),
+          squish: 0.90 + Math.random() * 0.08,
+        };
+      }
+
+      function sprayCluster(cx, cy, bias) {
+        const count = 5 + Math.floor(Math.random() * 4);
+        const baseRot = Math.random() * Math.PI * 2;
+        const phase = Math.random() * Math.PI * 2;
+        const speed = 0.14 + Math.random() * 0.28;
+        const cluster = [];
+        for (let i = 0; i < count; i++) {
+          const layer = i % 3;
+          const spread = 22 + Math.random() * 78;
+          const a = baseRot + (Math.random() - 0.5) * 1.35;
+          cluster.push(createLeaf(
+            cx + Math.cos(a) * spread,
+            cy + Math.sin(a) * spread * 0.62,
+            baseRot + (Math.random() - 0.5) * 0.85,
+            pickSpecies(bias),
+            layer,
+            phase + (Math.random() - 0.5) * 0.45,
+            speed * (0.88 + Math.random() * 0.28)
+          ));
+        }
+        return cluster;
       }
 
       function seed() {
-        const count = Math.round(Math.min(70, 28 + (w * h) / 38000));
-        leaves = Array.from({ length: count }, (_, i) => {
-          const layer = i % 3; // depth layers for parallax + opacity
-          return {
-            x: Math.random() * w,
-            y: Math.random() * h,
-            scale: 18 + Math.random() * (layer === 0 ? 55 : layer === 1 ? 40 : 28),
-            rot: Math.random() * Math.PI * 2,
-            lean: 0.75 + Math.random() * 0.55,
-            // wind phases
-            phase: Math.random() * Math.PI * 2,
-            speed: 0.15 + Math.random() * 0.45,
-            amp: 8 + Math.random() * 28,
-            rotAmp: 0.08 + Math.random() * 0.22,
-            layer,
-            alpha: layer === 0 ? 0.16 : layer === 1 ? 0.12 : 0.08,
-          };
-        });
+        initPaths();
+        const area = w * h;
+        const clusterCount = Math.round(Math.min(13, 6 + area / 150000));
+        leaves = [];
+        for (let i = 0; i < clusterCount; i++) {
+          const bias = SPECIES[i % SPECIES.length];
+          leaves.push(...sprayCluster(
+            (Math.random() * 1.18 - 0.09) * w,
+            (Math.random() * 1.18 - 0.09) * h,
+            bias
+          ));
+        }
+        const strays = Math.round(8 + area / 220000);
+        for (let i = 0; i < strays; i++) {
+          leaves.push(createLeaf(
+            Math.random() * w,
+            Math.random() * h,
+            Math.random() * Math.PI * 2,
+            SPECIES[i % SPECIES.length],
+            i % 3,
+            Math.random() * Math.PI * 2,
+            0.15 + Math.random() * 0.4
+          ));
+        }
+      }
+
+      function drawLeaf(L, x, y, rot) {
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.rotate(rot);
+        ctx.scale(L.scale * L.flip, L.scale * L.squish);
+        ctx.fillStyle = `rgba(72, 48, 28, ${L.alpha})`;
+        ctx.fill(paths[L.species]);
+        ctx.restore();
       }
 
       function frame(now) {
         const t = (now - t0) / 1000;
         ctx.clearRect(0, 0, w, h);
-
-        // Slight overall drift so the whole canopy feels alive
         const gust = reduce ? 0 : Math.sin(t * 0.35) * 0.5 + Math.sin(t * 0.11 + 1.7) * 0.5;
 
         for (const L of leaves) {
           const wind = reduce ? 0 : Math.sin(t * L.speed + L.phase) + gust * 0.35;
           const wind2 = reduce ? 0 : Math.sin(t * L.speed * 0.7 + L.phase * 1.3);
-          const x = L.x + wind * L.amp * (0.7 + L.layer * 0.25);
-          const y = L.y + wind2 * L.amp * 0.35;
-          const rot = L.rot + wind * L.rotAmp;
-
-          ctx.save();
-          ctx.translate(x, y);
-          ctx.rotate(rot);
-          // Stretch a bit like sunlight projecting through leaves at an angle
-          ctx.scale(1.15 + L.layer * 0.08, 0.72);
-          leafPath(ctx, L.scale, L.lean);
-          // Warm-brown shadow (golden hour, not cold grey)
-          ctx.fillStyle = `rgba(72, 48, 28, ${L.alpha})`;
-          ctx.fill();
-          ctx.restore();
-        }
-
-        // A few larger soft blobs for bigger canopy gaps
-        if (!reduce) {
-          for (let i = 0; i < 6; i++) {
-            const px = ((Math.sin(t * 0.07 + i) * 0.5 + 0.5) * w + i * 97) % w;
-            const py = ((Math.cos(t * 0.05 + i * 0.8) * 0.5 + 0.5) * h);
-            const r = 60 + (i % 3) * 40;
-            const g = ctx.createRadialGradient(px, py, 0, px, py, r);
-            g.addColorStop(0, "rgba(70, 45, 25, 0.07)");
-            g.addColorStop(1, "rgba(70, 45, 25, 0)");
-            ctx.fillStyle = g;
-            ctx.beginPath();
-            ctx.arc(px + Math.sin(t * 0.2 + i) * 20, py, r, 0, Math.PI * 2);
-            ctx.fill();
-          }
+          drawLeaf(
+            L,
+            L.x + wind * L.amp * (0.7 + L.layer * 0.25),
+            L.y + wind2 * L.amp * 0.35,
+            L.rot + wind * L.rotAmp
+          );
         }
 
         requestAnimationFrame(frame);
@@ -284,7 +408,7 @@
 
       window.addEventListener("resize", resize);
       resize();
-      requestAnimationFrame(frame);
+      frame(performance.now());
     })();
   </script>
 </body>
